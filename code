@@ -1,0 +1,109 @@
+            button.FlatStyle = FlatStyle.Flat;
+            button.FlatAppearance.BorderColor = Color.FromArgb(211, 217, 225);
+            button.BackColor = primary ? Color.FromArgb(45, 102, 196) : Color.White;
+            button.ForeColor = primary ? Color.White : Color.FromArgb(42, 52, 65);
+            if (primary) button.FlatAppearance.BorderSize = 0;
+        }
+        private void SetBusy(bool busy)
+        {
+            query.Enabled = !busy; cancel.Enabled = busy; clear.Enabled = !busy;
+            input.ReadOnly = busy; videoMode.Enabled = !busy; uploaderMode.Enabled = !busy;
+            UpdateExport();
+        }
+        private void UpdateExport() { copy.Enabled = export.Enabled = results.Count > 0; }
+        private void AddResult(QueryResult result)
+        {
+            results.Add(result);
+            int row = grid.Rows.Add(result.Kind, result.Kind == "视频" ? result.Title : result.Uploader,
+                result.Kind == "视频" ? result.Bvid : result.Uid, result.Uploader,
+                FormatNumber(result.Views), FormatNumber(result.Likes), FormatNumber(result.Comments),
+                FormatNumber(result.Followers), FormatNumber(result.Following), result.Status);
+            if (result.Status != "成功") grid.Rows[row].DefaultCellStyle.ForeColor = Color.FromArgb(175, 56, 56);
+            grid.Rows[row].Cells[1].ToolTipText = result.Title;
+            grid.Rows[row].Cells[9].ToolTipText = result.Status + "\n" + result.Input;
+            grid.FirstDisplayedScrollingRowIndex = row;
+            UpdateExport();
+        }
+
+        private async Task RunQuery()
+        {
+            if (cancellation != null) return;
+            List<string> items = new List<string>();
+            HashSet<string> seen = new HashSet<string>(StringComparer.Ordinal);
+            foreach (string inputToken in InputParser.Split(input.Text))
+                if (inputToken.Length > 0 && seen.Add(inputToken)) items.Add(inputToken);
+            if (items.Count == 0) { MessageBox.Show(this, "请先输入视频链接、BV 号、主页链接或 UID。", "没有输入"); return; }
+            if (items.Count > 100) { MessageBox.Show(this, "每批最多查询 100 个链接，请分批查询。", "链接过多"); return; }
+            QueryMode mode = videoMode.Checked ? QueryMode.Video : QueryMode.Uploader;
+            results.Clear(); grid.Rows.Clear();
+            cancellation = new CancellationTokenSource();
+            CancellationToken token = cancellation.Token;
+            SetBusy(true);
+            int succeeded = 0, failed = 0;
+            bool stopped = false;
+            try
+            {
+                for (int i = 0; i < items.Count; i++)
+                {
+                    token.ThrowIfCancellationRequested();
+                    status.Text = String.Format("正在查询 {0} / {1} · 成功 {2} · 失败 {3}", i + 1, items.Count, succeeded, failed);
+                    QueryResult result;
+                    try
+                    {
+                        result = await client.Query(items[i], mode, token);
+                        token.ThrowIfCancellationRequested();
+                        succeeded++;
+                    }
+                    catch (OperationCanceledException)
+                    {
+                        if (token.IsCancellationRequested) throw;
+                        result = Failure(items[i], mode, "请求超时（20 秒）。请检查网络或稍后再试。"); failed++;
+                    }
+                    catch (QueryException ex) { result = Failure(items[i], mode, ex.Message); failed++; }
+                    catch (HttpRequestException) { result = Failure(items[i], mode, "网络请求失败，请检查网络、代理或 HTTPS 连接。"); failed++; }
+                    catch (Exception ex) { result = Failure(items[i], mode, "查询失败：" + ex.Message); failed++; }
+                    if (closing) return;
+                    AddResult(result);
+                    if (i + 1 < items.Count) await Task.Delay(500, token);
+                }
+            }
+            catch (OperationCanceledException) { stopped = true; }
+            finally
+            {
+                cancellation.Dispose(); cancellation = null;
+                if (!closing)
+                {
+                    SetBusy(false);
+                    status.Text = String.Format("{0} · 成功 {1} · 失败 {2} · 共 {3} 条结果 · 双击行查看详情",
+                        stopped ? "已停止" : "查询完成", succeeded, failed, results.Count);
+                }
+            }
+        }
+
+        private static QueryResult Failure(string input, QueryMode mode, string error)
+        { return new QueryResult { Kind = mode == QueryMode.Video ? "视频" : "UP 主", Input = input, Status = error }; }
+
+        private void ExportCsv()
+        {
+            using (SaveFileDialog dialog = new SaveFileDialog { Filter = "CSV 文件 (*.csv)|*.csv",
+                FileName = "bilibili_" + DateTime.Now.ToString("yyyyMMdd_HHmmss") + ".csv", AddExtension = true })
+            {
+                if (dialog.ShowDialog(this) != DialogResult.OK) return;
+                try { File.WriteAllText(dialog.FileName, ResultExport.Csv(results), new UTF8Encoding(true)); status.Text = "CSV 已保存，可用 Excel 打开"; }
+                catch (Exception ex) { MessageBox.Show(this, "保存失败：" + ex.Message, "无法保存"); }
+            }
+        }
+    }
+
+    internal static class Program
+    {
+        [STAThread]
+        private static void Main()
+        {
+            ServicePointManager.SecurityProtocol = SecurityProtocolType.Tls12;
+            Application.EnableVisualStyles();
+            Application.SetCompatibleTextRenderingDefault(false);
+            Application.Run(new MainWindow());
+        }
+    }
+}
